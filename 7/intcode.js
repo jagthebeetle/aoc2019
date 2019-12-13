@@ -1,26 +1,56 @@
 const fs = require('fs');
 
-let stdin = [];
-
-let max = -Infinity;
-function aggregatingStdout(v) {
-  if (v > max) {
-    max = v;
+class Device {
+  constructor(name, ram, input, phaseConfig) {
+    this.name = name;
+    this.halted = false;
+    this.input = input;
+    this.output = [];
+    this.phaseConfig = phaseConfig;
+    this.initialRead = true;
+    this.ram = ram;
+    this.address = 0;
   }
-}
 
-function consumeIn() {
-  const next = stdin.shift();
-  return next;
-}
+  readInput() {
+    if (this.initialRead) {
+      this.initialRead = false;
+      return this.phaseConfig;
+    } else {
+      return this.input.pop();
+    }
+  }
 
-function emit(v) {
-  // .splice into second position because secretly it will be the next thing
-  // read by consumeIn.
-  if (stdin.length) {
-    stdin.splice(1, 0, v);
-  } else {
-    aggregatingStdout(v);
+  execute() {
+    let [op, params] = load(this.ram, this.address);
+    while (op) {
+      if (op.jump) {
+        if (op.jump(params[0])) {
+          this.address = params[1];
+        } else {
+          this.address += op.length;
+        }
+      } else if (op.halt) {
+        this.halted = true;
+        return;
+      } else {
+        if (op.read) {
+          const input = this.readInput();
+          if (input == null) {
+            return;
+          }
+          op.execute(...params, this.ram, () => input);
+        } else if (op.write) {
+          op.execute(...params, (v) => {
+            this.output.push(v);
+          });
+        } else {
+          op.execute(...params, this.ram);
+        }
+        this.address += op.length;
+      }
+      [op, params] = load(this.ram, this.address);
+    }
   }
 }
 
@@ -41,12 +71,14 @@ const OPCODES = {
     modeOverrides: {2: '1'},
   },
   3: {
-    execute: (a, ram) => ram[a] = consumeIn(),
+    read: true,
+    execute: (a, ram, consume) => ram[a] = consume(),
     length: 2,
     modeOverrides: {0: '1'},
   },
   4: {
-    execute: (a) => emit(a),
+    write: true,
+    execute: (a, emit) => emit(a),
     length: 2,
     modeOverrides: {},
   },
@@ -61,33 +93,13 @@ const OPCODES = {
     execute: (a, b, c, ram) => ram[c] = a === b ? 1 : 0,
     length: 4,
     modeOverrides: {2: '1'},
+  },
+  99: {
+    halt: true,
+    modeOverrides: {},
   }
 };
 
-function execute(ram) {
-  let address = 0;
-  let [op, params] = load(ram, address);
-  while (op) {
-    if (op.jump) {
-      if (op.jump(params[0])) {
-        address = params[1];
-      } else {
-        address += op.length;
-      }
-    } else {
-      op.execute(...params, ram);
-      address += op.length;
-    }
-    [op, params] = load(ram, address);
-  }
-  return ram[0];
-}
-
-/**
- *
- * @param {number[]} ram
- * @param {number} address
- */
 function load(ram, address) {
   const opAndModes = ram[address];
   const opcode = opAndModes % 100;
@@ -111,17 +123,39 @@ function load(ram, address) {
 const f = fs.readFileSync(process.argv[2] || 'input.txt', 'utf8');
 const program = f.split(',').map(Number);
 
-const permutations = permuteAll([4, 3, 2, 1, 0]);
-for (const permutation of permutations) {
-  stdin = [...permutation];
-  emit(0);
-  execute([...program]);
-  execute([...program]);
-  execute([...program]);
-  execute([...program]);
-  execute([...program]);
+const permutations = permuteAll([5, 6, 7, 8, 9]);
+
+let maxSignal = -Infinity;
+for (const phaseConfig of permutations) {
+  let devices = setUpAmplifierLoop(program, phaseConfig);
+  const deviceE = devices[4];
+
+  while (devices.length) {
+    for (const device of devices) {
+      device.execute();
+    }
+    devices = devices.filter(d => !d.halted);
+  }
+  const lastOutputFromE = deviceE.output.pop();
+  if (lastOutputFromE > maxSignal) {
+    maxSignal = lastOutputFromE;
+  }
 }
-console.info(max);
+console.info(maxSignal);
+
+function setUpAmplifierLoop(program, [aPhase, bPhase, cPhase, dPhase, ePhase]) {
+  const a = new Device('A', [...program], null, aPhase);
+  const b = new Device('B', [...program], a.output, bPhase);
+  const c = new Device('C', [...program], b.output, cPhase);
+  const d = new Device('D', [...program], c.output, dPhase);
+  const e = new Device('E', [...program], d.output, ePhase);
+
+  // Further special configuration of device A: tie the knot, and inject a
+  // synthetic 0 signal.
+  a.input = e.output;
+  a.input.push(0);
+  return [a, b, c, d, e];
+}
 
 // https://stackoverflow.com/a/20871714
 function permuteAll(inputArr) {
